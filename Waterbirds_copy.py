@@ -27,6 +27,9 @@ class Waterbirds:
             self.df = self.df[self.df.split == 1]
         elif split == 'test':
             self.df = self.df[self.df.split == 2]
+        elif split == 'gen': 
+            # For generated images, don't include anything from exclude
+            self.df = self.df[self.df['exclude'] != 1]
         # self.class_names = [f.split('/')[0] for f in self.df['img_filename'].unique()]
         self.class_names = ['Landbird', 'Waterbird']
         self.group_names = ['land_landbird', 'land_waterbird', 'water_landbird', 'water_waterbird']
@@ -53,7 +56,7 @@ class Waterbirds:
         sample = self.df.iloc[idx]
         img = Image.open(os.path.join(self.root, sample['img_filename'])).convert('RGB')
         label = int(sample['y'])
-        place = int(sample['place'])
+        # place = int(sample['place'])
         group = self.groups[idx]
         species = sample['img_filename'].split('/')[0]
         if self.transform:

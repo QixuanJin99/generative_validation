@@ -14,6 +14,7 @@ import argparse
 from torcheval.metrics import BinaryAUROC
 from torchvision.models import resnet50, ResNet50_Weights
 from torchvision.transforms import v2
+from Waterbirds_copy import Waterbirds
 
 
 parser = argparse.ArgumentParser(description='Waterbirds baseline training.')
@@ -25,15 +26,25 @@ parser.add_argument('--train_model', action="store_true")
 parser.add_argument('--transfer_model', action="store_true")
 parser.add_argument('--eval_model', action="store_true")
 parser.add_argument('--freeze_encoder', action="store_true")
+parser.add_argument('--use_diffusion_images', action="store_true")
 parser.add_argument('--epochs', type=int, default=1)
 parser.add_argument('--checkpoint_epochs', type=int, default=10)
 parser.add_argument('--seed', type=int, default=0)
+parser.add_argument('--ablation_num', type=int, default=5)
+parser.add_argument('--gen_ablation_num', type=int, default=None)
 args = parser.parse_args()
+
+transform = torchvision.transforms.Compose([v2.CenterCrop(224),
+                                            v2.RandomHorizontalFlip(),
+                                            v2.ToImage(),
+                                            v2.ToDtype(torch.float32, scale=True),
+                                            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), 
+                                            ])
 
 with open("waterbirds_preprocessed_datasets_classifier.pkl", "rb") as f: 
     preprocessed_datasets = pickle.load(f)
 
-train_dataloader = torch.utils.data.DataLoader(preprocessed_datasets['train'], batch_size=8, shuffle=True)
+train_dataloader = torch.utils.data.DataLoader(preprocessed_datasets['train'], batch_size=64, shuffle=True)
 val_dataloader = torch.utils.data.DataLoader(preprocessed_datasets['val'], batch_size=8, shuffle=False)
 test_dataloader = torch.utils.data.DataLoader(preprocessed_datasets['test'], batch_size=8, shuffle=False)
 
@@ -53,6 +64,26 @@ if "mixup" in output_dir:
 device = "cuda"
 
 if args.train_model: 
+    if args.use_diffusion_images:
+        gen_dir = "/mnt/scratch-lids/scratch/qixuanj/waterbird_generated_images/waterbirds_finetune_sd_token2_816_dreambooth/target100_background/strength1.0"
+        gen_ds = Waterbirds(gen_dir, "train", transform=transform)
+
+        # Previous set of results is with mix strength
+        # gen_dir = "/mnt/scratch-lids/scratch/qixuanj/waterbird_generated_images/waterbirds_finetune_sd_token2_816_dreambooth/mix_strength"
+        # gen_ds = Waterbirds(gen_dir, "gen", transform=transform)
+        
+        # gen_ds = torch.utils.data.Subset(gen_ds, random.sample(list(range(len(gen_ds))), 100))
+                                         
+        # gen_dir2 = "/mnt/scratch-lids/scratch/qixuanj/waterbird_generated_images/waterbirds_finetune_sd_token2_816/strength0.7"
+        # gen_ds2 = Waterbirds(gen_dir2, "gen", transform=transform)
+        # gen_ds2 = torch.utils.data.Subset(gen_ds2, random.sample(list(range(len(gen_ds2))), 100)) 
+                                          
+        mix_dataset = torch.utils.data.ConcatDataset([preprocessed_datasets['train'], 
+                                                      gen_ds, 
+                                                      # gen_ds2,
+                                                     ])
+        train_dataloader = torch.utils.data.DataLoader(mix_dataset, batch_size=64, shuffle=True)
+    
     model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
     model.fc =  torch.nn.Linear(2048, 1)
     model.to(device)
@@ -141,6 +172,7 @@ if args.train_model:
                     val_task_targets.append(targets.detach().cpu().numpy())
             val_task_outputs = np.concatenate(val_task_outputs)
             val_task_targets = np.concatenate(val_task_targets)
+            auc = BinaryAUROC()
             auc.update(torch.Tensor(val_task_outputs), torch.Tensor(val_task_targets))
             val_auc_result = auc.compute()
             val_aucs.append(val_auc_result)
@@ -155,21 +187,56 @@ if args.train_model:
         pickle.dump(val_aucs, f) 
 
 if args.transfer_model: 
-    mix_dataset = torch.utils.data.ConcatDataset([preprocessed_datasets['train'], 
-                                                 preprocessed_datasets['extra'],])
-    mix_dataloader = torch.utils.data.DataLoader(mix_dataset, batch_size=8, shuffle=True)
+    if args.use_diffusion_images:
+        gen_dir = "/mnt/scratch-lids/scratch/qixuanj/waterbird_generated_images/waterbirds_finetune_sd_token2_816_dreambooth/target100_background/strength1.0"
+        gen_ds = Waterbirds(gen_dir, "train", transform=transform)
+        if args.gen_ablation_num: 
+            gen_ds = torch.utils.data.Subset(gen_ds, gen_ds.df.sample(n=args.gen_ablation_num, random_state=0).index)
+
+        # gen_dir = "/mnt/scratch-lids/scratch/qixuanj/waterbird_generated_images/waterbirds_finetune_sd_token2_816_dreambooth/source"
+        # gen_ds = Waterbirds(gen_dir, "train", transform=transform)
+        
+        # gen_dir = "/mnt/scratch-lids/scratch/qixuanj/waterbird_generated_images/waterbirds_finetune_sd_token2_816_dreambooth/mix_strength"
+        # gen_ds = Waterbirds(gen_dir, "gen", transform=transform)
+        # gen_ds = torch.utils.data.Subset(gen_ds, random.sample(list(range(len(gen_ds))), 100))
+                                         
+        # gen_dir2 = "/mnt/scratch-lids/scratch/qixuanj/waterbird_generated_images/waterbirds_finetune_sd_token2_816/strength0.7"
+        # gen_ds2 = Waterbirds(gen_dir2, "gen", transform=transform)
+        # gen_ds2 = torch.utils.data.Subset(gen_ds2, random.sample(list(range(len(gen_ds2))), 100))
+                                          
+        mix_dataset = torch.utils.data.ConcatDataset([preprocessed_datasets['train'], 
+                                                      # preprocessed_datasets['extra'],
+                                                      # preprocessed_datasets['extra_group1'],
+                                                      # preprocessed_datasets['extra_group2'],
+                                                      gen_ds, 
+                                                      # gen_ds2,
+                                                     ])
+        mix_dataloader = torch.utils.data.DataLoader(mix_dataset, batch_size=64, shuffle=True)
+    else:
+        print(f"Ablation {args.ablation_num}")
+        mix_dataset = torch.utils.data.ConcatDataset([
+                                                     preprocessed_datasets['train'], 
+                                                    preprocessed_datasets[f'extra_{args.ablation_num}_group1'],
+                                                    preprocessed_datasets[f'extra_{args.ablation_num}_group2'],
+                                                     ])
+        mix_dataloader = torch.utils.data.DataLoader(mix_dataset, batch_size=64, shuffle=True)
 
     savedir = output_dir + "/transfer"
     if not os.path.exists(savedir): 
         os.makedirs(savedir)
         
-    with open(f"{output_dir}/val_aucs.pkl", "rb") as f: 
-        val_aucs = pickle.load(f)
-    val_aucs = [x.item() for x in val_aucs] 
+    # with open(f"{output_dir}/val_aucs.pkl", "rb") as f: 
+    #     val_aucs = pickle.load(f)
+    # val_aucs = [x.item() for x in val_aucs] 
     
-    epochs_map = np.arange(10, 101, 10)
-    checkpoint = str(epochs_map[np.argmax(np.array(val_aucs))])
-    model = torch.load(f"{output_dir}/checkpoint{checkpoint}.pt")
+    # epochs_map = np.arange(10, 101, 10)
+    # checkpoint = str(epochs_map[np.argmax(np.array(val_aucs))])
+    # model = torch.load(f"{output_dir}/checkpoint{checkpoint}.pt")
+
+    # New Transfer
+    model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+    model.fc =  torch.nn.Linear(2048, 1)
+    model.to(device)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
     criterion = torch.nn.BCELoss()
@@ -256,6 +323,7 @@ if args.transfer_model:
                     val_task_targets.append(targets.detach().cpu().numpy())
             val_task_outputs = np.concatenate(val_task_outputs)
             val_task_targets = np.concatenate(val_task_targets)
+            auc = BinaryAUROC()
             auc.update(torch.Tensor(val_task_outputs), torch.Tensor(val_task_targets))
             val_auc_result = auc.compute()
             val_aucs.append(val_auc_result)

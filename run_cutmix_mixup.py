@@ -13,6 +13,7 @@ import argparse
 import os
 from torchvision.transforms import v2
 import random
+from cxr_dataset_gen import CXRGenDataset
 
 def get_devices(gpus):
     if len(gpus) == 0:
@@ -28,29 +29,29 @@ def get_devices(gpus):
     return device, device_ids
 
 
-def convert_output(model_name, outputs): 
-    # Function that convert the model output to standard 8 labels 
-    output_mapping = {
-        "mimic": [0, 10, 1, 4, 14, 8, 3], 
-        "chexpert": [0, 10, 1, 4, 14, 8, 3], 
-        "padchest": [0, 10, 1, 4, 8, 3], 
-        "nih": [0, 10, 1, 4, 8, 3], 
-        "all": [0, 10, 1, 4, 14, 8, 3],
-    }
-    pathologies = ["Atelectasis", "Cardiomegaly", "Consolidation", "Edema", 
-               "Lesion", "Pneumonia", "Pneumothorax", "No Finding"]
-    new_outputs = outputs[:, output_mapping[model_name]]
+# def convert_output(model_name, outputs): 
+#     # Function that convert the model output to standard 8 labels 
+#     output_mapping = {
+#         "mimic": [0, 10, 1, 4, 14, 8, 3], 
+#         "chexpert": [0, 10, 1, 4, 14, 8, 3], 
+#         "padchest": [0, 10, 1, 4, 8, 3], 
+#         "nih": [0, 10, 1, 4, 8, 3], 
+#         "all": [0, 10, 1, 4, 14, 8, 3],
+#     }
+#     pathologies = ["Atelectasis", "Cardiomegaly", "Consolidation", "Edema", 
+#                "Lesion", "Pneumonia", "Pneumothorax", "No Finding"]
+#     new_outputs = outputs[:, output_mapping[model_name]]
 
-    if model_name == "padchest" or model_name == "nih": 
-        lesion = torch.max(outputs[:, 11], outputs[:, 12])
-        new_outputs = torch.hstack((new_outputs[:, :4], lesion.unsqueeze(1), new_outputs[:, 4:]))
+#     if model_name == "padchest" or model_name == "nih": 
+#         lesion = torch.max(outputs[:, 11], outputs[:, 12])
+#         new_outputs = torch.hstack((new_outputs[:, :4], lesion.unsqueeze(1), new_outputs[:, 4:]))
 
-    # Append "No Findings" output as last column 
-    no_finding_output = outputs[:, [i for i, x in enumerate(pathologies) if x != '']]
-    # Max probability over all class with positive finding, then take the inverse 
-    no_finding = 1. - no_finding_output.max(axis=1)[0]
-    new_outputs = torch.hstack((new_outputs, no_finding.unsqueeze(1)))
-    return new_outputs
+#     # Append "No Findings" output as last column 
+#     no_finding_output = outputs[:, [i for i, x in enumerate(pathologies) if x != '']]
+#     # Max probability over all class with positive finding, then take the inverse 
+#     no_finding = 1. - no_finding_output.max(axis=1)[0]
+#     new_outputs = torch.hstack((new_outputs, no_finding.unsqueeze(1)))
+#     return new_outputs
 
 # Specific to CXR labelled in order of pathologies 
 def convert_target_cxr(labels): 
@@ -114,7 +115,7 @@ def valid_test_epoch(name, epoch, model, model_name, device, data_loader,
             loss = loss.sum()
             
             avg_loss.append(loss.detach().cpu().numpy())
-            t.set_description(f'Epoch {epoch + 1} - {name} - Loss = {np.mean(avg_loss):4.4f}')
+            t.set_description(f'Epoch {epoch} - {name} - Loss = {np.mean(avg_loss):4.4f}')
             
         for task in range(len(task_targets)):
             task_outputs[task] = np.concatenate(task_outputs[task])
@@ -222,7 +223,7 @@ def train_epoch(name, epoch, model, model_name, device, data_loader,
         optimizer.step()
 
         avg_loss.append(loss.detach().cpu().numpy())
-        t.set_description(f'Epoch {epoch + 1} - {name} - Loss = {np.mean(avg_loss):4.4f}')
+        t.set_description(f'Epoch {epoch} - {name} - Loss = {np.mean(avg_loss):4.4f}')
 
     for task in range(len(task_targets)):
         task_outputs[task] = np.concatenate(task_outputs[task])
@@ -250,13 +251,17 @@ if __name__ == '__main__':
     parser.add_argument('--train_num', type=int, default=1000)
     parser.add_argument('--class_balanced', action="store_true")
     parser.add_argument('--output_dir', type=str, default="")
+    parser.add_argument('--base_dir', type=str, default="")
     parser.add_argument('--use_cutmix', action="store_true")
     parser.add_argument('--use_mixup', action="store_true")
     parser.add_argument('--train_model', action="store_true")
     parser.add_argument('--transfer_model', action="store_true")
     parser.add_argument('--eval_train_model', action="store_true")
     parser.add_argument('--eval_model', action="store_true")
+    parser.add_argument('--eval_train_model_cross', action="store_true")
     parser.add_argument('--freeze_encoder', action="store_true")
+    parser.add_argument('--use_diffusion_images', action="store_true")
+    parser.add_argument('--eval_mimic', action="store_true")
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--checkpoint_epochs', type=int, default=2)
     parser.add_argument('--seed', type=int, default=0)
@@ -278,6 +283,12 @@ if __name__ == '__main__':
         limit = 10
     else: 
         limit = None
+
+    transform = torchvision.transforms.Compose([xrv.datasets.XRayCenterCrop(),
+                                              xrv.datasets.XRayResizer(224),
+                                              v2.ToDtype(torch.float32, scale=True),
+                                              v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), 
+                                              ])
     
     criterion = torch.nn.BCEWithLogitsLoss()
     if args.train_model:
@@ -288,6 +299,15 @@ if __name__ == '__main__':
             split_datasets = pickle.load(f)
         base_dataset = split_datasets[model_name]["train"]
         val_dataset = split_datasets[model_name]["val"]
+
+        if args.use_diffusion_images: 
+            gen_ds = CXRGenDataset(file_path="/data/healthy-ml/gobi1/data/MIMIC-CXR-JPG/files", 
+                      transfer_dataset=dataset_name, 
+                      split="gen_0.9", 
+                      transform=transform)
+            base_dataset =  torch.utils.data.ConcatDataset([base_dataset, gen_ds,])
+            print("Augmented dataset size: {}".format(len(base_dataset)))
+            
             
         base_train_dataloader = torch.utils.data.DataLoader(base_dataset, batch_size=16, shuffle=True)
         val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=8, shuffle=False)
@@ -333,22 +353,26 @@ if __name__ == '__main__':
             pickle.dump(val_log, f)
 
     if args.transfer_model: 
-        with open("split_datasets_balanced_v2.pkl", "rb") as f: 
-            split_datasets = pickle.load(f)
-        with open(f"transfer_dataset_seed{args.seed}.pkl", "rb") as f: 
-            transfer_dataset = pickle.load(f)
-
-        with open(f"{args.output_dir}/train/logs/{args.seed}/{model_name}_epoch10_val_log.pkl", "rb") as f: 
+        if args.use_diffusion_images: 
+            load_dir = args.base_dir
+        else: 
+            load_dir = args.output_dir
+        
+        with open(f"{load_dir}/train/logs/{args.seed}/{model_name}_epoch10_val_log.pkl", "rb") as f: 
             val_log = pickle.load(f)
-            
         # Select model by best validation accuracy 
         val_aucs = [x.item() for x in val_log['auc']]
         epochs_map = np.arange(2, 11, 2)
         checkpoint = str(epochs_map[np.argmax(np.array(val_aucs))])
 
-        model_path = f"{args.output_dir}/train/models/{args.seed}/{model_name}_epoch{checkpoint}_model.pt"
+        model_path = f"{load_dir}/train/models/{args.seed}/{model_name}_epoch{checkpoint}_model.pt"
         model = torch.load(model_path)
-
+        
+        with open("split_datasets_balanced_v2.pkl", "rb") as f: 
+            split_datasets = pickle.load(f)
+        with open(f"transfer_dataset_seed{args.seed}.pkl", "rb") as f: 
+            transfer_dataset = pickle.load(f)
+            
         source_dataset = split_datasets[model_name]["train"]
         val_dataset = split_datasets[dataset_name]["val"]
         
@@ -358,7 +382,18 @@ if __name__ == '__main__':
         else: 
             keyword = "match"
             transfer_dataset = transfer_dataset[dataset_name][args.train_num]['match_ds']
-        mix_dataset = torch.utils.data.ConcatDataset([source_dataset, transfer_dataset])
+
+        if args.use_diffusion_images: 
+            gen_ds = CXRGenDataset(file_path="/data/healthy-ml/gobi1/data/MIMIC-CXR-JPG/files", 
+                      transfer_dataset=dataset_name, 
+                      split="gen_0.9", 
+                      transform=transform)
+            mix_dataset =  torch.utils.data.ConcatDataset([source_dataset,
+                                                           gen_ds,
+                                                           transfer_dataset])
+        else: 
+            mix_dataset = torch.utils.data.ConcatDataset([source_dataset, transfer_dataset])
+        print("Mix dataset: {} Images".format(len(mix_dataset)))
             
         mix_dataloader = torch.utils.data.DataLoader(mix_dataset, batch_size=8, shuffle=True)
         val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=8, shuffle=False)
@@ -433,6 +468,37 @@ if __name__ == '__main__':
             pickle.dump(task_outputs, f)
         with open(f"{output_dir}/train/logs/{args.seed}/{model_name}_epoch{args.epochs}_task_targets.pkl", "wb") as f: 
             pickle.dump(task_targets, f)
+            
+    if args.eval_train_model_cross: 
+        with open("split_datasets_balanced_v2.pkl", "rb") as f: 
+            split_datasets = pickle.load(f)
+        test_dataloader = torch.utils.data.DataLoader(split_datasets[dataset_name]["test"], batch_size=8, shuffle=False)
+
+        with open(f"{args.output_dir}/train/logs/{args.seed}/{model_name}_epoch10_val_log.pkl", "rb") as f: 
+            val_log = pickle.load(f)
+            
+        # Select model by best validation accuracy 
+        val_aucs = [x.item() for x in val_log['auc']]
+        epochs_map = np.arange(2, 11, 2)
+        checkpoint = str(epochs_map[np.argmax(np.array(val_aucs))])
+
+        model_path = f"{args.output_dir}/train/models/{args.seed}/{model_name}_epoch{checkpoint}_model.pt"
+        model = torch.load(model_path)
+        
+        print("Evaluate model")
+        auc, task_aucs, task_outputs, task_targets = valid_test_epoch("test", 0, model, model_name, 
+                                                                      "cuda", test_dataloader, 
+                                                                      torch.nn.BCEWithLogitsLoss(), 
+                                                                      num_classes=8,
+                                                                     limit=limit)
+        with open(f"{output_dir}/train/logs/{args.seed}/{model_name}_{dataset_name}_epoch{args.epochs}_auc.pkl", "wb") as f: 
+            pickle.dump([auc], f)
+        with open(f"{output_dir}/train/logs/{args.seed}/{model_name}_{dataset_name}_epoch{args.epochs}_task_aucs.pkl", "wb") as f: 
+            pickle.dump(task_aucs, f)
+        with open(f"{output_dir}/train/logs/{args.seed}/{model_name}_{dataset_name}_epoch{args.epochs}_task_outputs.pkl", "wb") as f: 
+            pickle.dump(task_outputs, f)
+        with open(f"{output_dir}/train/logs/{args.seed}/{model_name}_{dataset_name}_epoch{args.epochs}_task_targets.pkl", "wb") as f: 
+            pickle.dump(task_targets, f)
         
     if args.eval_model:
         # Load preprocessed dataset
@@ -442,8 +508,12 @@ if __name__ == '__main__':
             keyword = "balanced"
         else: 
             keyword = "match"
+
+        if args.eval_mimic: 
+            test_dataloader = torch.utils.data.DataLoader(split_datasets["mimic"]["test"], batch_size=8, shuffle=False)
+        else:
+            test_dataloader = torch.utils.data.DataLoader(split_datasets[dataset_name]["test"], batch_size=8, shuffle=False)
             
-        test_dataloader = torch.utils.data.DataLoader(split_datasets[dataset_name]["test"], batch_size=8, shuffle=False)
         with open(f"{args.output_dir}/transfer/logs/{args.train_num}/{args.seed}/{model_name}_{dataset_name}_{keyword}_epoch10_val_log.pkl", "rb") as f: 
             val_log = pickle.load(f)
             

@@ -26,8 +26,7 @@ keywords = [
     # "waterbirds_finetune_sd_transfer_100",
     # "waterbirds_finetune_sd_transfer_500",
     # "waterbirds_finetune_sd_transfer_816",
-    
-           ]
+]
 
 transform = torchvision.transforms.Compose([v2.CenterCrop(224),
                                             v2.RandomHorizontalFlip(),
